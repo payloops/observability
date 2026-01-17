@@ -5,7 +5,7 @@ Shared observability package for PayLoops services. Provides OpenTelemetry traci
 ## Installation
 
 ```bash
-pnpm add @payloops/observability
+npm install @payloops/observability
 ```
 
 ## Features
