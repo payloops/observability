@@ -133,7 +133,7 @@ export function recordWorkflowStarted(workflowType: string, taskQueue: string) {
   workflowStartedCounter.add(1, { workflow_type: workflowType, task_queue: taskQueue });
 }
 
-export function recordWorkflowCompleted(workflowType: string, taskQueue: string, durationMs: number) {
+export function recordWorkflowCompleted(workflowType: string, taskQueue: string, _durationMs: number) {
   workflowCompletedCounter.add(1, { workflow_type: workflowType, task_queue: taskQueue });
 }
 
