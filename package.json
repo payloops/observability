@@ -2,6 +2,10 @@
   "name": "@payloops/observability",
   "version": "0.0.2",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/payloops/observability"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
