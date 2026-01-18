@@ -79,7 +79,7 @@ function emitToOtel(level: string, message: string, attributes: Record<string, u
         env: NODE_ENV,
         ...attributes
       },
-      timestamp: Date.now() * 1000000, // nanoseconds
+      // Don't set timestamp - let OTel SDK use current time automatically
       ...(spanContext && {
         spanId: spanContext.spanId,
         traceId: spanContext.traceId,
