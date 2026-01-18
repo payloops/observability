@@ -1,80 +1,85 @@
-import pino from 'pino';
 import { trace } from '@opentelemetry/api';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { getCorrelationContext } from './context';
 
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'loop';
+const LOG_LEVEL = process.env.LOG_LEVEL || (NODE_ENV === 'production' ? 'info' : 'debug');
 
-// Map Pino log levels to OpenTelemetry severity numbers
-const pinoLevelToOtelSeverity: Record<number, SeverityNumber> = {
-  10: SeverityNumber.TRACE, // trace
-  20: SeverityNumber.DEBUG, // debug
-  30: SeverityNumber.INFO, // info
-  40: SeverityNumber.WARN, // warn
-  50: SeverityNumber.ERROR, // error
-  60: SeverityNumber.FATAL // fatal
+// ANSI colors for pretty console output
+const colors = {
+  reset: '\x1b[0m',
+  dim: '\x1b[2m',
+  red: '\x1b[31m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m'
 };
 
+const levelConfig: Record<string, { severity: SeverityNumber; color: string; label: string; priority: number }> = {
+  trace: { severity: SeverityNumber.TRACE, color: colors.dim, label: 'TRACE', priority: 0 },
+  debug: { severity: SeverityNumber.DEBUG, color: colors.blue, label: 'DEBUG', priority: 1 },
+  info: { severity: SeverityNumber.INFO, color: colors.green, label: 'INFO', priority: 2 },
+  warn: { severity: SeverityNumber.WARN, color: colors.yellow, label: 'WARN', priority: 3 },
+  error: { severity: SeverityNumber.ERROR, color: colors.red, label: 'ERROR', priority: 4 },
+  fatal: { severity: SeverityNumber.FATAL, color: colors.magenta, label: 'FATAL', priority: 5 }
+};
+
+const currentLevelPriority = levelConfig[LOG_LEVEL]?.priority ?? 2;
+
 /**
- * Mixin that adds trace context to every log entry
+ * Get trace and correlation context for log enrichment
  */
-const traceMixin = () => {
-  const mixinData: Record<string, string | undefined> = {};
+function getContext(): Record<string, string | undefined> {
+  const ctx: Record<string, string | undefined> = {};
 
   // Add OpenTelemetry trace context
   const span = trace.getActiveSpan();
   if (span) {
     const spanContext = span.spanContext();
-    mixinData.trace_id = spanContext.traceId;
-    mixinData.span_id = spanContext.spanId;
+    ctx.trace_id = spanContext.traceId;
+    ctx.span_id = spanContext.spanId;
   }
 
   // Add correlation context
   const correlationCtx = getCorrelationContext();
   if (correlationCtx) {
-    mixinData.correlation_id = correlationCtx.correlationId;
-    if (correlationCtx.merchantId) mixinData.merchant_id = correlationCtx.merchantId;
-    if (correlationCtx.orderId) mixinData.order_id = correlationCtx.orderId;
-    if (correlationCtx.workflowId) mixinData.workflow_id = correlationCtx.workflowId;
+    ctx.correlation_id = correlationCtx.correlationId;
+    if (correlationCtx.merchantId) ctx.merchant_id = correlationCtx.merchantId;
+    if (correlationCtx.orderId) ctx.order_id = correlationCtx.orderId;
+    if (correlationCtx.workflowId) ctx.workflow_id = correlationCtx.workflowId;
   }
 
-  return mixinData;
-};
+  return ctx;
+}
 
 /**
- * Emit a log record to OpenTelemetry
- * Note: We get a fresh logger reference each time to ensure we're using the
- * real LoggerProvider after initTelemetry() has been called, not the ProxyLoggerProvider.
+ * Emit log to OpenTelemetry
  */
-function emitToOtel(logRecord: Record<string, unknown>) {
+function emitToOtel(level: string, message: string, attributes: Record<string, unknown>) {
   try {
-    // Check if a real LoggerProvider has been set up
-    // ProxyLoggerProvider is the default no-op provider
     const provider = logs.getLoggerProvider();
     if (provider.constructor.name === 'ProxyLoggerProvider') {
-      // initTelemetry hasn't been called yet, skip OTLP emission
-      return;
+      return; // OTel not initialized yet
     }
 
     const otelLogger = provider.getLogger(SERVICE_NAME);
-
-    // Extract trace context
     const span = trace.getActiveSpan();
     const spanContext = span?.spanContext();
+    const config = levelConfig[level];
 
     otelLogger.emit({
-      severityNumber: pinoLevelToOtelSeverity[logRecord.level as number] || SeverityNumber.INFO,
-      severityText: pino.levels.labels[logRecord.level as number] || 'INFO',
-      body: logRecord.msg as string,
+      severityNumber: config?.severity ?? SeverityNumber.INFO,
+      severityText: config?.label ?? 'INFO',
+      body: message,
       attributes: {
-        ...logRecord,
-        // Remove fields that are part of the log record structure
-        msg: undefined,
-        level: undefined,
-        time: undefined
+        service: SERVICE_NAME,
+        env: NODE_ENV,
+        ...attributes
       },
-      timestamp: logRecord.time ? new Date(logRecord.time as string).getTime() * 1000000 : Date.now() * 1000000, // nanoseconds
+      timestamp: Date.now() * 1000000, // nanoseconds
       ...(spanContext && {
         spanId: spanContext.spanId,
         traceId: spanContext.traceId,
@@ -82,123 +87,136 @@ function emitToOtel(logRecord: Record<string, unknown>) {
       })
     });
   } catch {
-    // Ignore errors - don't break logging
+    // Don't break logging if OTel fails
   }
 }
 
 /**
- * Custom destination that sends logs to both stdout and OpenTelemetry
+ * Format log for console output
  */
-function createOtelDestination() {
-  const stdout = pino.destination(1); // stdout
+function formatConsole(level: string, message: string, data: Record<string, unknown>): string {
+  const config = levelConfig[level];
+  const timestamp = new Date().toISOString();
+  const color = config?.color ?? colors.reset;
+  const label = config?.label ?? level.toUpperCase();
+
+  if (NODE_ENV === 'production') {
+    // JSON format for production
+    return JSON.stringify({
+      time: timestamp,
+      level: label,
+      msg: message,
+      service: SERVICE_NAME,
+      env: NODE_ENV,
+      ...data
+    });
+  }
+
+  // Pretty format for development
+  const timeStr = `${colors.dim}[${timestamp.split('T')[1].slice(0, -1)}]${colors.reset}`;
+  const levelStr = `${color}${label.padEnd(5)}${colors.reset}`;
+  const msgStr = `${color}${message}${colors.reset}`;
+
+  const dataEntries = Object.entries(data).filter(([, v]) => v !== undefined);
+  const dataStr = dataEntries.length > 0
+    ? '\n' + dataEntries.map(([k, v]) => `    ${colors.magenta}${k}${colors.reset}: ${JSON.stringify(v)}`).join('\n')
+    : '';
+
+  return `${timeStr} ${levelStr}: ${msgStr}${dataStr}`;
+}
+
+/**
+ * Core log function
+ */
+function log(level: string, msgOrData: string | Record<string, unknown>, msg?: string) {
+  const config = levelConfig[level];
+  if (!config || config.priority < currentLevelPriority) {
+    return;
+  }
+
+  let message: string;
+  let data: Record<string, unknown>;
+
+  if (typeof msgOrData === 'string') {
+    message = msgOrData;
+    data = {};
+  } else {
+    message = msg ?? '';
+    data = msgOrData;
+  }
+
+  // Add trace/correlation context
+  const context = getContext();
+  const enrichedData = { ...data, ...context };
+
+  // Output to console
+  console.log(formatConsole(level, message, enrichedData));
+
+  // Send to OTel
+  emitToOtel(level, message, enrichedData);
+}
+
+export interface Logger {
+  trace(msg: string): void;
+  trace(data: Record<string, unknown>, msg: string): void;
+  debug(msg: string): void;
+  debug(data: Record<string, unknown>, msg: string): void;
+  info(msg: string): void;
+  info(data: Record<string, unknown>, msg: string): void;
+  warn(msg: string): void;
+  warn(data: Record<string, unknown>, msg: string): void;
+  error(msg: string): void;
+  error(data: Record<string, unknown>, msg: string): void;
+  fatal(msg: string): void;
+  fatal(data: Record<string, unknown>, msg: string): void;
+  child(bindings: Record<string, unknown>): Logger;
+}
+
+/**
+ * Create a logger instance with optional default bindings
+ */
+function createLogger(bindings: Record<string, unknown> = {}): Logger {
+  const boundLog = (level: string, msgOrData: string | Record<string, unknown>, msg?: string) => {
+    if (typeof msgOrData === 'string') {
+      log(level, { ...bindings }, msgOrData);
+    } else {
+      log(level, { ...bindings, ...msgOrData }, msg);
+    }
+  };
 
   return {
-    write(msg: string) {
-      // Write to stdout
-      stdout.write(msg);
-
-      // Parse and send to OpenTelemetry
-      try {
-        const logRecord = JSON.parse(msg);
-        emitToOtel(logRecord);
-      } catch {
-        // Ignore parse errors - just write to stdout
-      }
-    }
+    trace: (msgOrData: string | Record<string, unknown>, msg?: string) => boundLog('trace', msgOrData, msg),
+    debug: (msgOrData: string | Record<string, unknown>, msg?: string) => boundLog('debug', msgOrData, msg),
+    info: (msgOrData: string | Record<string, unknown>, msg?: string) => boundLog('info', msgOrData, msg),
+    warn: (msgOrData: string | Record<string, unknown>, msg?: string) => boundLog('warn', msgOrData, msg),
+    error: (msgOrData: string | Record<string, unknown>, msg?: string) => boundLog('error', msgOrData, msg),
+    fatal: (msgOrData: string | Record<string, unknown>, msg?: string) => boundLog('fatal', msgOrData, msg),
+    child: (childBindings: Record<string, unknown>) => createLogger({ ...bindings, ...childBindings })
   };
 }
 
 /**
- * Custom hook that emits logs to OTLP before they're written
+ * Base logger instance
  */
-const otelHooks = {
-  logMethod(
-    this: pino.Logger,
-    inputArgs: Parameters<pino.LogFn>,
-    method: pino.LogFn,
-    level: number
-  ) {
-    // Call the original method first
-    method.apply(this, inputArgs);
-
-    // Then emit to OTLP
-    const [objOrMsg, msgOrUndefined] = inputArgs;
-    const logRecord: Record<string, unknown> = {
-      level,
-      time: new Date().toISOString(),
-      service: SERVICE_NAME,
-      env: NODE_ENV
-    };
-
-    // Handle different call signatures: logger.info(obj, msg) or logger.info(msg)
-    if (typeof objOrMsg === 'object' && objOrMsg !== null) {
-      Object.assign(logRecord, objOrMsg);
-      logRecord.msg = msgOrUndefined || '';
-    } else {
-      logRecord.msg = objOrMsg;
-    }
-
-    // Add mixin data (trace context, correlation context)
-    Object.assign(logRecord, traceMixin());
-
-    emitToOtel(logRecord);
-  }
-};
-
-/**
- * Base logger with trace context mixin
- * In development: pretty print to console + OTLP
- * In production: JSON to stdout + OTLP
- */
-export const logger = pino(
-  {
-    level: NODE_ENV === 'production' ? 'info' : 'debug',
-    mixin: traceMixin,
-    base: {
-      service: SERVICE_NAME,
-      env: NODE_ENV
-    },
-    timestamp: pino.stdTimeFunctions.isoTime,
-    hooks: otelHooks,
-    // In development, use pino-pretty for console output
-    ...(NODE_ENV !== 'production' && {
-      transport: {
-        target: 'pino-pretty',
-        options: { colorize: true }
-      }
-    })
-  },
-  // In production, also write JSON to stdout (in addition to OTLP via hooks)
-  NODE_ENV === 'production' ? pino.destination(1) : undefined
-);
+export const logger = createLogger({ service: SERVICE_NAME, env: NODE_ENV });
 
 /**
  * Create a child logger for a specific activity
  */
 export function createActivityLogger(activityName: string, correlationId?: string) {
-  return logger.child({
-    activity: activityName,
-    correlationId
-  });
+  return logger.child({ activity: activityName, correlationId });
 }
 
 /**
  * Create a child logger for a specific workflow
  */
 export function createWorkflowLogger(workflowId: string, correlationId?: string) {
-  return logger.child({
-    workflowId,
-    correlationId
-  });
+  return logger.child({ workflowId, correlationId });
 }
 
 /**
  * Create a child logger for HTTP requests
  */
 export function createRequestLogger(requestId: string, method: string, path: string) {
-  return logger.child({
-    requestId,
-    method,
-    path
-  });
+  return logger.child({ requestId, method, path });
 }
