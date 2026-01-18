@@ -8,10 +8,9 @@ import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import {
   LoggerProvider,
-  BatchLogRecordProcessor,
-  ConsoleLogRecordExporter
+  BatchLogRecordProcessor
 } from '@opentelemetry/sdk-logs';
-import { logs, SeverityNumber } from '@opentelemetry/api-logs';
+import { logs } from '@opentelemetry/api-logs';
 
 let sdk: NodeSDK | null = null;
 let loggerProvider: LoggerProvider | null = null;
