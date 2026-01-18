@@ -1,12 +1,20 @@
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-http';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
 import { Resource } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import {
+  LoggerProvider,
+  BatchLogRecordProcessor,
+  ConsoleLogRecordExporter
+} from '@opentelemetry/sdk-logs';
+import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 
 let sdk: NodeSDK | null = null;
+let loggerProvider: LoggerProvider | null = null;
 
 export interface TelemetryConfig {
   serviceName: string;
@@ -30,12 +38,25 @@ export function initTelemetry(config: TelemetryConfig | string, serviceVersion =
   const otlpEndpoint = cfg.otlpEndpoint || process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://localhost:4318';
   const environment = cfg.environment || process.env.NODE_ENV || 'development';
 
+  const resource = new Resource({
+    [ATTR_SERVICE_NAME]: cfg.serviceName,
+    [ATTR_SERVICE_VERSION]: cfg.serviceVersion || '0.0.1',
+    'deployment.environment': environment
+  });
+
+  // Set up log exporter
+  const logExporter = new OTLPLogExporter({
+    url: `${otlpEndpoint}/v1/logs`
+  });
+
+  loggerProvider = new LoggerProvider({ resource });
+  loggerProvider.addLogRecordProcessor(new BatchLogRecordProcessor(logExporter));
+
+  // Register the logger provider globally
+  logs.setGlobalLoggerProvider(loggerProvider);
+
   sdk = new NodeSDK({
-    resource: new Resource({
-      [ATTR_SERVICE_NAME]: cfg.serviceName,
-      [ATTR_SERVICE_VERSION]: cfg.serviceVersion || '0.0.1',
-      'deployment.environment': environment
-    }),
+    resource,
 
     traceExporter: new OTLPTraceExporter({
       url: `${otlpEndpoint}/v1/traces`
@@ -60,8 +81,7 @@ export function initTelemetry(config: TelemetryConfig | string, serviceVersion =
   sdk.start();
 
   process.on('SIGTERM', () => {
-    sdk
-      ?.shutdown()
+    Promise.all([sdk?.shutdown(), loggerProvider?.shutdown()])
       .then(() => console.log('Telemetry shut down'))
       .catch((err) => console.error('Telemetry shutdown error', err));
   });
