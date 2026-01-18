@@ -44,10 +44,20 @@ const traceMixin = () => {
 
 /**
  * Emit a log record to OpenTelemetry
+ * Note: We get a fresh logger reference each time to ensure we're using the
+ * real LoggerProvider after initTelemetry() has been called, not the ProxyLoggerProvider.
  */
 function emitToOtel(logRecord: Record<string, unknown>) {
   try {
-    const otelLogger = logs.getLogger(SERVICE_NAME);
+    // Check if a real LoggerProvider has been set up
+    // ProxyLoggerProvider is the default no-op provider
+    const provider = logs.getLoggerProvider();
+    if (provider.constructor.name === 'ProxyLoggerProvider') {
+      // initTelemetry hasn't been called yet, skip OTLP emission
+      return;
+    }
+
+    const otelLogger = provider.getLogger(SERVICE_NAME);
 
     // Extract trace context
     const span = trace.getActiveSpan();
