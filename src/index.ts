@@ -2,7 +2,7 @@
 export { initTelemetry, shutdownTelemetry, type TelemetryConfig } from './lib/otel';
 
 // Logger
-export { logger, createActivityLogger, createWorkflowLogger, createRequestLogger } from './lib/logger';
+export { logger, createActivityLogger, createWorkflowLogger, createRequestLogger, type Logger } from './lib/logger';
 
 // Correlation Context
 export {
